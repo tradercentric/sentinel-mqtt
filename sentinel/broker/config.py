@@ -5,9 +5,13 @@ from pydantic import BaseModel, Field
 
 class HAConfig(BaseModel):
     enabled: bool = False
-    peers: list[str] = Field(default_factory=list)  # host:port pairs
-    heartbeat_interval: float = 1.0   # seconds
-    failover_timeout: float = 5.0     # seconds before promoting standby
+    role: str = "primary"           # "primary" or "standby"
+    ha_host: str = "0.0.0.0"
+    ha_port: int = 1884
+    peer_host: str = ""
+    peer_ha_port: int = 1884
+    ping_interval: float = 2.0
+    failover_timeout: float = 8.0
 
 
 class BrokerConfig(BaseModel):

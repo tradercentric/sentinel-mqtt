@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import argparse
+from typing import TYPE_CHECKING
 
 from ..protocol.packets import PacketType, QoS, ConnectReturnCode
 from ..protocol.reader import read_packet, parse_connect, parse_publish, parse_subscribe, parse_unsubscribe
@@ -12,17 +13,22 @@ from .router import TopicRouter
 from .session import Session, SessionManager
 from .retained import RetainedStore
 
+if TYPE_CHECKING:
+    from ..ha.cluster import HAManager
+
 log = logging.getLogger("sentinel.broker")
 
 
 class Broker:
-    def __init__(self, host: str = "0.0.0.0", port: int = 1883) -> None:
+    def __init__(self, host: str = "0.0.0.0", port: int = 1883,
+                 ha_manager: "HAManager | None" = None) -> None:
         self.host = host
         self.port = port
         self._router = TopicRouter()
         self._sessions = SessionManager(self._router)
         self._retained = RetainedStore()
         self._server: asyncio.AbstractServer | None = None
+        self._ha: "HAManager | None" = ha_manager
 
     async def listen(self) -> int:
         """Start listening; return the actual bound port."""
@@ -57,6 +63,8 @@ class Broker:
         finally:
             if session:
                 await self._send_will(session)
+                if self._ha and session.clean_session:
+                    self._ha.replicate_session_del(session.client_id)
                 self._sessions.disconnect(session.client_id)
             writer.close()
 
@@ -136,6 +144,11 @@ class Broker:
 
         if pkt.retain:
             self._retained.set(pkt.topic, pkt.payload, int(pkt.qos))
+            if self._ha:
+                if pkt.payload:
+                    self._ha.replicate_retained_set(pkt.topic, pkt.payload, int(pkt.qos))
+                else:
+                    self._ha.replicate_retained_del(pkt.topic)
 
         if pkt.qos == QoS.AT_LEAST_ONCE:
             assert pkt.packet_id is not None
@@ -173,6 +186,8 @@ class Broker:
 
             self._sessions.add_subscription(session, sub.topic, effective_qos, make_callback(session))
             return_codes.append(effective_qos)
+            if self._ha and not session.clean_session:
+                self._ha.replicate_session_sub(session.client_id, sub.topic, effective_qos)
 
             # deliver matching retained messages immediately
             for msg in self._get_retained_matching(sub.topic):
@@ -188,6 +203,8 @@ class Broker:
         pkt = parse_unsubscribe(payload)
         for topic in pkt.topics:
             self._sessions.remove_subscription(session, topic)
+            if self._ha and not session.clean_session:
+                self._ha.replicate_session_unsub(session.client_id, topic)
         session.writer.write(encode.encode_unsuback(pkt.packet_id))
         await session.writer.drain()
 
