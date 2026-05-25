@@ -22,13 +22,24 @@ class Broker:
         self._router = TopicRouter()
         self._sessions = SessionManager(self._router)
         self._retained = RetainedStore()
+        self._server: asyncio.AbstractServer | None = None
+
+    async def listen(self) -> int:
+        """Start listening; return the actual bound port."""
+        self._server = await asyncio.start_server(self._handle_client, self.host, self.port)
+        port = self._server.sockets[0].getsockname()[1]
+        log.info("sentinel-mqtt listening on %s:%d", self.host, port)
+        return port
+
+    async def close(self) -> None:
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
 
     async def start(self) -> None:
-        server = await asyncio.start_server(self._handle_client, self.host, self.port)
-        addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
-        log.info("sentinel-mqtt listening on %s", addrs)
-        async with server:
-            await server.serve_forever()
+        await self.listen()
+        async with self._server:
+            await self._server.serve_forever()
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
@@ -60,6 +71,10 @@ class Broker:
         session, session_present = self._sessions.get_or_create(pkt.client_id, pkt.clean_session)
         session.writer = writer
         session.connected = True
+        session.will_topic = pkt.will_topic
+        session.will_message = pkt.will_message
+        session.will_qos = int(pkt.will_qos)
+        session.will_retain = pkt.will_retain
 
         writer.write(encode.encode_connack(ConnectReturnCode.ACCEPTED, session_present))
         await writer.drain()
@@ -113,7 +128,7 @@ class Broker:
                 await writer.drain()
 
             elif ptype == PacketType.DISCONNECT:
-                session.will_topic = None  # clean disconnect — suppress will
+                session.will_topic = None
                 break
 
     async def _handle_publish(self, session: Session, flags: int, payload: bytes) -> None:
@@ -177,10 +192,9 @@ class Broker:
         await session.writer.drain()
 
     async def _send_will(self, session: Session) -> None:
-        will_topic = getattr(session, "will_topic", None)
-        will_message = getattr(session, "will_message", None)
-        if will_topic and will_message:
-            await self._route(will_topic, will_message, 0, False)
+        if session.will_topic and session.will_message:
+            await self._route(session.will_topic, session.will_message,
+                              session.will_qos, session.will_retain)
 
     async def _deliver_retained_for_session(self, session: Session) -> None:
         for topic_filter in session.subscriptions:

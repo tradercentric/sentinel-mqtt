@@ -17,6 +17,10 @@ class Session:
     pending_qos2_out: dict[int, bytes] = field(default_factory=dict)  # packet_id -> PUBCOMP pending
     next_packet_id: int = 1
     connected: bool = False
+    will_topic: str | None = None
+    will_message: bytes | None = None
+    will_qos: int = 0
+    will_retain: bool = False
 
     def allocate_packet_id(self) -> int:
         pid = self.next_packet_id
